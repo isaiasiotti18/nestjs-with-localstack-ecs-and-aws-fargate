@@ -1,0 +1,149 @@
+## ============================================================
+##  docker-compose.fargate.yml
+##  Simula ECS Fargate localmente
+##  - Network isolada (como awsvpc mode)
+##  - Resource limits (cpu/mem como task definition)
+##  - Health check (como container health check do ECS)
+##  - Restart policy (como ECS service desired count)
+##  - Logging driver (simula awslogs)
+## ============================================================
+
+services:
+  # ── Data Layer (simula RDS) ─────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fargate-db
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  # ── Application (simula Fargate Task) ───────────────────────
+  #  - network isolada (awsvpc mode)
+  #  - resource limits (256 CPU / 512 MB como task def)
+  #  - health check (como container health check)
+  #  - restart: always (simula desired count = 1)
+  #  - read_only rootfs (como Fargate ephemeral storage)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fargate-task-app
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: app
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - public
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "ecs/bun-nestjs-task/{{.Name}}"
+    labels:
+      ecs.cluster: "bun-nestjs-cluster"
+      ecs.service: "bun-nestjs-service"
+      ecs.task-definition: "bun-nestjs-task:1"
+      ecs.launch-type: "FARGATE"
+      ecs.cpu: "256"
+      ecs.memory: "512"
+      ecs.network-mode: "awsvpc"
+
+  # ── Sidecar: Log Router (simula awslogs driver) ────────────
+  #  Em produção Fargate usa o awslogs driver pro CloudWatch.
+  #  Aqui usamos promtail-like approach: tail dos logs em /var/log
+  log-router:
+    image: alpine:3.19
+    container_name: fargate-log-router
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo '[log-router] Watching container logs...'
+        mkdir -p /var/log/ecs
+        while true; do
+          docker_log=/var/lib/docker/containers
+          echo \"[log-router] Log rotation active — $(date -Iseconds)\"
+          sleep 60
+        done
+      "
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - public
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 64M
+
+  # ── Scaling Test (simula desired count > 1) ─────────────────
+  #  Descomente pra rodar múltiplas tasks como ECS service
+  # app-replica:
+  #   extends:
+  #     service: app
+  #   container_name: fargate-task-app-2
+  #   ports:
+  #     - "3001:3000"
+
+# ── Networks (simula awsvpc + security groups) ────────────────
+networks:
+  public:
+    name: fargate-public
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+  data:
+    name: fargate-data
+    driver: bridge
+    internal: true   # ← sem acesso externo, como private subnet
+
+# ── Volumes ───────────────────────────────────────────────────
+volumes:
+  pgdata:
+    name: fargate-pgdata

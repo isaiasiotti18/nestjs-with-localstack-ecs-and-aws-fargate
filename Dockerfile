@@ -21,6 +21,10 @@ FROM oven/bun:1.1-slim AS production
 
 WORKDIR /app
 
+# curl é necessário pro HEALTHCHECK do ECS e do Docker
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 
 COPY package.json bun.lockb* ./
@@ -31,6 +35,6 @@ COPY --from=builder /app/dist ./dist
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD bun -e "fetch('http://localhost:3000/health/live').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+  CMD curl -sf http://localhost:3000/health/live || exit 1
 
 CMD ["bun", "run", "dist/main.js"]
